@@ -8,42 +8,93 @@ const subDomain = config.require("subDomain");
 const instanceType = config.get("instanceType") || "t3.micro";
 const ec2KeyName = config.require("ec2KeyName");
 const sftpBucketName = config.require("sftpBucketName");
+const chargeruser_pass = config.requireSecret("chargeruser_pass");
 
 // Get the default VPC and public subnets
 const defaultVpc = pulumi.output(aws.ec2.getVpc({ default: true }));
-const publicSubnets = defaultVpc.apply((vpc) =>
-    aws.ec2.getSubnets({ filters: [{ name: "vpc-id", values: [vpc.id] }] })
-);
+const publicSubnets = defaultVpc.apply(async (vpc) => {
+    // Get all subnets in the VPC
+    const subnets = await aws.ec2.getSubnets({
+        filters: [{ name: "vpc-id", values: [vpc.id] }],
+    });
+
+    const publicSubnetIds: string[] = [];
+    for (const subnetId of subnets.ids) {
+        try {
+            // Attempt to get the explicitly associated route table
+            const routeTable = await aws.ec2.getRouteTable({
+                filters: [{ name: "association.subnet-id", values: [subnetId] }],
+            });
+
+            // Check if the route table has a route to an Internet Gateway
+            const isPublic = routeTable.routes.some(route => route.gatewayId?.startsWith("igw-"));
+            if (isPublic) {
+                publicSubnetIds.push(subnetId);
+            }
+        } catch (error: unknown) {
+            // Explicitly check if the error is an instance of Error
+            if (error instanceof Error && error.message.includes("query returned no results")) {
+                // No explicit route table found, check the main route table
+                const mainRouteTable = await aws.ec2.getRouteTable({
+                    filters: [{ name: "vpc-id", values: [vpc.id] }, { name: "association.main", values: ["true"] }],
+                });
+
+                // Check if the main route table has a route to an Internet Gateway
+                const isPublic = mainRouteTable.routes.some(route => route.gatewayId?.startsWith("igw-"));
+                if (isPublic) {
+                    publicSubnetIds.push(subnetId);
+                }
+            } else {
+                // Re-throw any other errors
+                throw error;
+            }
+        }
+    }
+
+    return publicSubnetIds;
+});
 
 // Security Group for SFTP EC2 instance
 const sftpSecurityGroup = new aws.ec2.SecurityGroup("sftp-sg", {
     vpcId: defaultVpc.apply((vpc) => vpc.id),
     ingress: [
-        // Open port 443 for SFTP over SSH
         { protocol: "tcp", fromPort: 443, toPort: 443, cidrBlocks: ["0.0.0.0/0"] },
     ],
     egress: [
         { protocol: "-1", fromPort: 0, toPort: 0, cidrBlocks: ["0.0.0.0/0"] },
     ],
+    tags: {
+        Name: "SFTP Security Group",
+        ManagedBy: "Pulumi",
+    },
 });
 
 // IAM Role and Instance Profile
 const sftpRole = new aws.iam.Role("sftp-role", {
     assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({ Service: "ec2.amazonaws.com" }),
+    tags: {
+        ManagedBy: "Pulumi",
+    },
 });
 
 const sftpInstanceProfile = new aws.iam.InstanceProfile("sftp-instance-profile", {
     role: sftpRole.name,
+    tags: {
+        ManagedBy: "Pulumi",
+    },
 });
 
 // Create S3 bucket
 const sftpBucket = new aws.s3.Bucket("sftpBucket", {
     bucket: sftpBucketName,
     acl: "private",
+    tags: {
+        Name: "SFTP Bucket",
+        ManagedBy: "Pulumi",
+    },
 });
 
-// Create “folders” by putting placeholder objects (zero-length)
-// so that the S3 console and s3fs see them
+// Create "folders" by putting placeholder objects
 const sftpFolderFirmwares = new aws.s3.BucketObject("firmwaresPlaceholder", {
     bucket: sftpBucket.bucket,
     key: "firmwares/.placeholder",
@@ -123,9 +174,13 @@ const sftpInstance = new aws.ec2.Instance("sftp-instance", {
     instanceType,
     keyName: ec2KeyName,
     vpcSecurityGroupIds: [sftpSecurityGroup.id],
-    subnetId: publicSubnets.apply((subnets) => subnets.ids[0]),
+    subnetId: publicSubnets.apply((subnets) => subnets[0]),
     iamInstanceProfile: sftpInstanceProfile.name,
     associatePublicIpAddress: true,
+    tags: {
+        Name: "SFTP Instance",
+        ManagedBy: "Pulumi",
+    },
     userData: pulumi.interpolate`
 #!/bin/bash
 sudo yum update -y
@@ -142,7 +197,7 @@ sudo chmod 755 /data/sftp
 
 # Create the SFTP user
 sudo useradd -s /sbin/nologin chargeruser
-echo "chargeruser:N0GasA11Watts!" | sudo chpasswd
+echo "chargeruser:${chargeruser_pass}" | sudo chpasswd
 
 # Create subfolders for firmwares and diagnostics
 sudo mkdir -p /data/sftp/firmwares /data/sftp/diagnostics
@@ -179,7 +234,12 @@ echo "s3fs#${sftpBucketName}:/firmwares /data/sftp/firmwares fuse _netdev,iam_ro
 });
 
 // Elastic IP and association
-const elasticIp = new aws.ec2.Eip("sftp-eip");
+const elasticIp = new aws.ec2.Eip("sftp-eip", {
+    tags: {
+        Name: "SFTP Elastic IP",
+        ManagedBy: "Pulumi",
+    },
+});
 const eipAssociation = new aws.ec2.EipAssociation("sftp-eip-assoc", {
     instanceId: sftpInstance.id,
     allocationId: elasticIp.allocationId,

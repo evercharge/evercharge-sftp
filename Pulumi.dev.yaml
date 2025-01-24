@@ -5,3 +5,5 @@ config:
   evercharge-sftp:instanceType: t3.micro
   evercharge-sftp:ec2KeyName: evercharge-dev
   evercharge-sftp:sftpBucketName: evercharge-dev-sftp
+  evercharge-sftp:chargeruser_pass:
+    secure: AAABABXi0kTffPTRFHzMEoAsyCdSDz8i0eBMPKhAHz1ucTnpQn7PcRoZujHH
