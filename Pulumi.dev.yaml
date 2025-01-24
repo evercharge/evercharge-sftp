@@ -1,0 +1,7 @@
+config:
+  aws:region: us-west-2
+  evercharge-sftp:domainName: dev.evercharge.com
+  evercharge-sftp:subDomain: sftp
+  evercharge-sftp:instanceType: t3.micro
+  evercharge-sftp:ec2KeyName: evercharge-dev
+  evercharge-sftp:sftpBucketName: evercharge-dev-sftp
